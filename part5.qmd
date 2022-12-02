@@ -1,3 +1,296 @@
 # Deloppgave 5: Analysere repeterte målinger
 
-<!-- Part 1: Analyzing repeated measures experiments -->
+```{r}
+#| label: "setup"
+#| include: false
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(exscidata)
+library(lme4)
+library(emmeans)
+library(pbkrtest)
+library(lmerTest)
+library(gt)
+
+
+data("strengthvolume")
+data("dxadata")
+
+data <- dxadata %>%
+  select(participant:include, lean.left_leg, lean.right_leg) %>%
+  pivot_longer(names_to = "leg", 
+               values_to = "lean.mass", 
+               cols = lean.left_leg:lean.right_leg) %>%
+  mutate(leg = if_else(leg == "lean.left_leg", "L", "R"), 
+         sets = if_else(multiple == leg, "multiple", "single")) %>%
+  select(participant, time, sex, include, sets, leg, lean.mass) %>%
+  full_join(strengthvolume) %>% 
+  filter(exercise == "legext",
+         !is.na(load)) %>%
+    group_by(participant) %>% 
+    filter(n() == 12) %>% 
+  ungroup() %>%
+  mutate(time = factor(time, levels = c("pre", "session1", "week2", "week5", "week9", "post")),
+         sets = factor(sets, levels = c("single", "multiple")),
+         timec = as.numeric(case_when(time == "pre" ~ 0,
+                                      time == "session1" ~ 0,
+                                      time == "week2" ~ 2,
+                                      time == "week5" ~ 5,
+                                      time == "week9" ~ 9,
+                                      time == "post" ~ 12)))
+
+```
+
+## Introduksjon
+I utrente personer som begynner med styrketrening varierer økningen i muskelstyrke, målt som 1RM, med 1% per økt, men med en variasjon på hele 0.1-3% [@mcdonagh_adaptive_1984], og tverrsnittet til de styrketrente musklene øker 0.1-0.5% per økt [@wernbom_influence_2007]. Den store varisjonen i styrke- og muskelvekst er sannsynligvis avhengig av hvilken muskelgruppe som trenes, fibertypesammensetning, antall serier, repetisjoner, intensitet, pausetid og genetiske ulikheter [@tonnessen_trening_2018; @wackerhage_molecular_2014; @raastad_styrketrening_2010]. 
+
+Sannsynligvis er det et dose-respons-forhold mellom treningsmengde og styrkeøkning per tidsenhet [@raastad_styrketrening_2010]. Treningsmengden er både avhengig av antall økter i uka og hvor mange serier eller øvelser vi trener på hver muskegruppe. Ettersom tidsbegrensninger ofte hindrer deltakere i treningsprogrammer [@choi_correlates_2017] er det av interesse å finne den minimale treningsdosen som gir gunstige adaptasjoner. Oversiktsarikler fra en amerikansk forskergruppe løfter konseptet om at en serie i hver øvelse er den mest effektive treningsformen [@carpinelli_strength_1998; @carpinelli_berger_2002]. Videre hevder de at det er bortkastet tid å gjennomføre mer enn en serie på en muskelgruppe. Andre meta-analyser viser at moderate treningsvolum (3 serier) er fordelaktig [@krieger_single_2009; @krieger_single_2010]. Disse ambivalente resultatene skyldes til dels denne store interindivid-variasjonen i treningsrespons. Intraindivide studiedesign med unilateral treningsvolum på ekstremitetene vil trolig fjerne mye usikkerhet.
+
+Målet med denne studien var å undersøke effekten av singel- og multiserie (3 serier) treningsprotokoller på muskelstyrke og muskelmasse med et intraindivid studiedesign.
+
+## Metode
+
+### Deltakere og studiedesign
+41 menn og kvinner deltakere ble rekrutert til den nåværende studien med initielle kriterier som ikke-røykene og alder mellom 18 og 40 år. Eksklusjonskriteriene var intoleranse til lokal bedøvelse, mer enn en ukentlig styrketreningsøkt det siste året, redusert muskelstyrke pga tidligere eller nåværende skader, og intak av medikamenter som kan påvirke adaptasjoner til trening. I dataanalysen ble alle deltakere som ikke gjennomførte kneekstensjonsstesting på hvert tidspunkt brukt (N = 22). Deltakernes karakteristikker vises i @tbl-kar.
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| label: "tbl-kar"
+#| tbl-cap: "Karakteristikker av deltakerne ved pretest"
+
+
+dxadata %>%
+  select(participant:weight, lean.left_leg, lean.right_leg) %>%
+  pivot_longer(names_to = "leg", 
+               values_to = "lean.mass", 
+               cols = lean.left_leg:lean.right_leg) %>% 
+  mutate(leg = if_else(leg == "lean.left_leg", "L", "R"), 
+         sets = if_else(multiple == leg, "multiple", "single"),
+         lean.mass = lean.mass / 1000) %>%
+  select(participant, age, height, weight, time, sex, include, sets, leg, lean.mass) %>%
+  full_join(strengthvolume) %>% 
+  filter(exercise == "legext",
+         !is.na(load)) %>%
+    group_by(participant) %>% 
+    filter(n() == 12) %>% 
+  ungroup() %>% 
+  filter(time == "pre") %>% 
+  group_by(sets) %>% 
+  mutate(N = n()) %>%
+  pivot_longer(names_to = "variable",
+               values_to = "values",
+               cols = c(age, height, weight, lean.mass, load, N)) %>% 
+  group_by(variable) %>% 
+  summarise(Mean = mean(values, na.rm = T),
+            SD = sd(values, na.rm = T)) %>% 
+   mutate(MS = if_else(variable == "N",
+                      as.character(Mean),
+                      paste0(signif(Mean, 3),
+                             " (",
+                        signif(SD, 3), 
+                        ")"))) %>% 
+  select(-Mean, -SD) %>%
+  mutate(variable = factor(variable, levels = c("N", 
+                                                "age", 
+                                                "height", 
+                                                "weight", 
+                                                "lean.mass", 
+                                                "load"), 
+                           labels = c("N", 
+                                      "Alder", 
+                                      "Kroppslengde", 
+                                      "Kroppsvekt", 
+                                      "Fettfri Masse", 
+                                      "1RM Kneekstensjon"))) %>% 
+  arrange(variable) %>% 
+  gt() %>% 
+  cols_label(variable = "",
+             MS = "gj.snitt (SD)")
+  
+  
+```
+
+
+Intervensjonen bestå av 12 uker med helkropp styrketrening, alle deltakerne gjennomførte intervensjonen i løpet av september til november. Bein-øvelser ble utført unilateralt for å tillate innen-deltaker forskjeller i treningsvolum. Videre ble beinene til deltakerne tilfeldig fordelt til å utføre enten en serie (1 serie gruppen) og tre serier (3 serier gruppen), hver deltaker gjennomførte dermed begge protokollene. Maksimal muskelstyrke i kneekstensjon ble testet før (pre), underveis (uke 3, 5 og 9) og etter (post) intervensjonen. Kroppssammensetning ble målt før og etter treningsintervensjonen.
+
+### DXA
+Kroppssammensetning ble bestemt før og etter intervensjonen med bruk av dual-energy X-ray absorptiometry (DXA) (Lunar Prodigy, GE Healthcare, Oslo, Norge), iht standard protokoll. Før DXA målinger ble deltakerne bedt om å være fastende i minimum to timer og frastå all fysisk anstrengende aktivitet de siste 48 timene. Mellom DXA målinger og forrige stykeøkt var det to dager.
+
+### Maksimal Styrke i kneekstensjon
+Maksimal stykre i kneekstensjon ble målt som den høyeste repetisjonen (1RM) i en unilateral kneekstensjon. Testprotokollen begynte med en spesifikk oppvarming bestående av 10, 6 og 3 repetisjoner på 50, 75 og 85% av predikert 1RM. Deretter ble 1RM fundet ved å øke motstanden (kg) progresivt inntil vekten ikke ble løftet i hele bevegelsesbanen, den høyeste vekten med fult bevegelsesutslag ble definert som 1RM. Hver deltaker fikk 4-6 forsøk.
+
+### Dataanalyse og Statistikk
+All beskrvende data er presentert som gj.snitt (standardfeil) om annet ikke er spesifisert. For å undersøke effekten av treningsvolum på muskelhypertrofi og styrke ble det brukt mixed linear models (LLMs) spesifisert med tid og tid til treningsvolum interaksjoner som fikserte effekter. LMMs ble spesifisert med tilfeldige intercepts for deltakerne. Plotter med residualer mot predikerte verdier ble visuelt inspisert for antakelser om homoskedastisitet. Statistisk signifikansnivå ble satt til < 0.05.
+
+\newpage
+
+## Resultat
+
+Både singel og multipel treningssett økte muskelstyrken i 1RM kneekstensjon og muskelmassen (fettfri masse) over den 12 uker lange treningsintervensjonen, se @fig-str og @fig-lbm. Denne forbedringen ser ikke ut til å ha en sammenheng med antall sett, ettersom det ikke ble observert en effekt av treningsvolum på utvikling i 1RM kneekstensjon eller fettfri masse etter 12 uker med styrketrening, se @tbl-mod og @fig-change. 
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| label: "tbl-mod"
+#| tbl-cap: "Volumavhengig effekt på muskelstyrke og muskelmasse fra LMMs. Koeffisienten av interesse er Tid:Gruppemultiple ettersom den viser til forskjell i stigningstallet for modellen mellom treningsvolumgruppenegruppene. SE viser til standardfeil og DF viser til frihetsgrader"
+
+m1_str <- lmer(load ~ timec * sets + (1|participant), data = data)
+
+tab_str <- summary(m1_str)$coef %>% 
+  data.frame() %>% 
+   mutate(Koeffisienter = c("Intercept", 
+                           "Tid", 
+                           "Gruppemultiple", 
+                           "Tid:Gruppemultiple")) %>%
+  select(Koeffisienter, Estimate, Std..Error, df, t.value, Pr...t..)
+
+data_lmb <- data %>% 
+  filter(time == "pre" | time == "post") %>% 
+  select(participant, time, sets, lean.mass) %>% 
+  mutate(lean.mass = lean.mass / 1000)
+
+m1_lbm <- lmer(lean.mass ~ time * sets + (1|participant), data = data_lmb)
+
+summary(m1_lbm)$coef %>% 
+  data.frame() %>% 
+   mutate(Koeffisienter = c("Intercept", 
+                           "Tid", 
+                           "Gruppemultiple", 
+                           "Tid:Gruppemultiple")) %>%
+  select(Koeffisienter, Estimate, Std..Error, df, t.value, Pr...t..) %>% 
+  full_join(tab_str) %>% 
+  gt() %>% 
+  cols_label(Koeffisienter = md("**Koeffisienter**"),
+             Estimate = md("**Estimat**"),
+             Std..Error = md("**SE**"),
+             df = md("**DF**"),
+             t.value = md("**t.verdi**"),
+             Pr...t.. = md("**p.verdi**")) %>% 
+  fmt_number(columns = Estimate:Pr...t.., decimals = 2) %>% 
+  tab_row_group(label = md("*Fettfri Masse*"), rows = 1:4) %>% 
+  tab_row_group(label = md("*1RM Kneekstensjon*"), rows = 5:8)
+
+
+```
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| label: "fig-str"
+#| fig-cap: "Volumavhengig effekt på muskelstyrke i 1RM kneekstensjon. Punkter viser til gjennomsnitt og stolpene viser til gjennomsnittets standardavvik"
+
+
+data %>% 
+  group_by(time, sets) %>% 
+  summarise(Mean = mean(load, na.rm = T),
+            SD = sd(load, na.rm = T)) %>% 
+  mutate(timec = as.numeric(case_when(time == "pre" ~ 0,
+                                      time == "session1" ~ 0,
+                                      time == "week2" ~ 2,
+                                      time == "week5" ~ 5,
+                                      time == "week9" ~ 9,
+                                      time == "post" ~ 12))) %>% 
+  ggplot(aes(timec, Mean, group = sets, color = sets)) +
+  geom_line(position = position_dodge(width = 0.7)) +
+  geom_point(position = position_dodge(width = 0.7),
+             size = 3) +
+  geom_errorbar(aes(ymin = Mean - SD, ymax = Mean + SD), 
+                position = position_dodge(width =0.7),
+                width = 0.7) +
+  scale_x_continuous(breaks = seq(0, 16, 1)) +
+  scale_y_continuous(breaks = seq(40, 130, 10)) +
+  labs(x = "Tid (uker)",
+       y = "1RM Kneekstensjon (kg)",
+       color = "Treningsvolum") +
+  theme_classic()
+
+```
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-height: 3
+#| fig-width: 6
+#| label: "fig-lbm"
+#| fig-cap: "Volumavhengig effekt på fettfri masse. Linjene viser hver deltakers forandring i fettfri masse fra pre- til posttest, punktene viser gjennomsnitt og stolpene viser gjennomsnittets konfidensintervaller"
+
+
+est_lbm <- emmeans(m1_lbm, specs = ~ time|sets)
+
+est_lbm %>%
+  data.frame() %>%
+  ggplot(aes(time, emmean, group = sets, color = sets) ) +
+  geom_line(data = data_lmb, 
+            aes(time, lean.mass, 
+                group = participant, 
+                color = sets),
+            alpha = 0.4) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), 
+                position = position_dodge(width = 0.2), 
+                width = 0.15,
+                size = 0.4,
+                color = "black") +
+  geom_line(position = position_dodge(width = 0.2)) +
+  geom_point(position = position_dodge(width = 0.2),
+             size = 3) +
+  theme_classic() +
+  labs(y = "Fettfri masse (kg)", 
+       color = "Treningsvolum") +
+   theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank())
+
+```
+
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-height: 2
+#| fig-width: 3
+#| label: "fig-change"
+#| fig-cap: "Gjennomsnittlig forskjeller mellom treningsvolumgruppene. Punktene viser gjennomsnittlig forskjell og stolpene viser konfidensintervallen til gjennomsnittene" 
+
+conf_intervals_lbm <- confint(m1_lbm)
+
+coefs_lbm <- summary(m1_lbm)$coef
+
+coef_summary_lbm <- cbind(coefs_lbm, data.frame(conf_intervals_lbm)[3:6, ]) 
+
+
+coef_summary_lbm %>%
+  mutate(coef = rownames(.)) %>%
+  filter(coef %in% c("setsmultiple", "timepost:setsmultiple")) %>% 
+  mutate(time = gsub("time", "", coef), 
+         time = gsub(":setsmultiple", "", time), 
+         time = if_else(time == "setsmultiple", "pre", time)) %>%
+  mutate(time = factor(time, levels = c("pre", "post"))) %>%
+  ggplot(aes(time, Estimate)) + 
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_errorbar(aes(ymin = X2.5.., ymax = X97.5..), width = 0.1) +
+  geom_point(shape = 24, size = 3, fill = "orange") +
+  theme_classic() + 
+  labs(y = "Gj.snitt gruppevis forskjell\n(kg, 95% CI)",
+       x = "Tidspunkt") 
+
+```
+
+\pagebreak
+## Diskusjon
+
+I denne studien så vi ikke en effekt av treningsvolum på utvikling i muskemasse eller muskelstyrke. For utrente individer ser det dermed ut som man får like stor styrke- og muskelvekst av å gjennomføre en serie per muskelgruppe som å gjennomføre tre serier. Dette samsvarer med oversiktsartiklene som hevder at det ikke finnes en ytterligere gevinst av å øke treningsvolumet utover en serie [@carpinelli_strength_1998; @carpinelli_berger_2002]. Det samsvarer derimot ikke med meta-analyser som har konkludert med at moderat volum er fordelaktig på utvikling i muskelstyrke og muskelmasse [@krieger_single_2009; @krieger_single_2010; @schoenfeld_dose-response_2017]. Resultatene i denne studien bør imidlertidig tolkes forsiktig ettersom en nokså lav utvalgstørrelse på 19 senker den statistiske styrken. I tillegg var deltakerne på et lavt treningsnivå før treningsintervensjonen, dette er av betydning ettersom at effekten av treningsvolum på styrke- og muskelvekst er trolig lavere for utrente [@raastad_styrketrening_2010]. Generelt ser det ut til at jo bedre trent personen er, desto flere serier må personen trene på hver muskelgruppe [@peterson_maximizing_2004; @rhea_meta-analysis_2003]. 
+
+### Konklusjon
+
+Denne studien indikerer at det for utrente ikke finnes en effekt av treningsvolum (1 serie vs 3 serier) på styrke- og muskelvekst på 12 ukers treningsprogram. Dette viser at gunstige treningsadaptasjoner oppstår på minimale treningsvolum som en serie per muskelgruppe. Resultatene bør allikevel tolkes noe forsiktet da det er noen metedologiske svakheter i studien, bl.a lav utvalgstørrelse og lav treningsstatus.
